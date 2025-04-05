@@ -3,3 +3,5 @@ face_recognition
 imutils 
 numpy
 ipykernel
+secure-smtplib
+python-dotenv

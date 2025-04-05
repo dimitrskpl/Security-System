@@ -1,3 +1,5 @@
 sec-env
 test_img/
 faceenv
+.env
+snapshots/
