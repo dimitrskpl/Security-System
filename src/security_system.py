@@ -13,22 +13,26 @@ class SecuritySystem:
         img_folder=None,
         alert_timeout=30,
         forget_timeout=60,
-        match_threshold=0.45,
+        match_uknown_threshold=0.45,
+        match_known_threshold=0.45,
         max_unknowns=10,
         alarm_duration=300,
         motion_sensitivity=5000,
+        enable_notification=False,
     ):
 
         self.img_folder = img_folder
         self.tracker = UnknownPersonTracker(
             alert_timeout=alert_timeout,
             forget_timeout=forget_timeout,
-            match_threshold=match_threshold,
+            match_threshold=match_uknown_threshold,
             max_unknowns=max_unknowns,
             alarm_duration=alarm_duration,
         )
         self.motion_background = None
         self.motion_sensitivity = motion_sensitivity
+        self.match_known_threshold = match_known_threshold
+        self.enable_notification = enable_notification
 
         self.notifier = NotificationEngine()
 
@@ -107,16 +111,20 @@ class SecuritySystem:
         return face_locations, encodings
 
     def get_matches(self, face_encoding):
-        matches = face_recognition.compare_faces(self.known_encodings, face_encoding)
-        name = "Unknown"
-        if matches:
-            face_distances = face_recognition.face_distance(
-                self.known_encodings, face_encoding
-            )
-            best_match_index = face_distances.argmin()
-            if matches[best_match_index]:
-                name = self.known_names[best_match_index]
-        return name
+        face_distances = face_recognition.face_distance(
+            self.known_encodings, face_encoding
+        )
+
+        if len(face_distances) == 0:
+            return "Unknown"
+
+        best_match_index = face_distances.argmin()
+        best_distance = face_distances[best_match_index]
+
+        if best_distance < self.match_known_threshold:
+            return self.known_names[best_match_index]
+        else:
+            return "Unknown"
 
     def system_alert(self, alerts, frame):
         for alert in alerts:
@@ -178,13 +186,15 @@ class SecuritySystem:
 
 def main():
     camera = SecuritySystem(
-        # img_folder="../test_img/",
-        img_folder="",
+        img_folder="../test_img/",
+        # img_folder="",
         alert_timeout=10,
         forget_timeout=20,
-        match_threshold=0.45,
+        match_uknown_threshold=0.6,
+        match_known_threshold=0.5,
         max_unknowns=10,
         alarm_duration=15,
+        enable_notification=False,
     )
     camera.start_face_recognition()
 
