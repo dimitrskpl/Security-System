@@ -2,4 +2,8 @@ sec-env
 test_img/
 faceenv
 .env
-snapshots/
+data/
+architecture/
+__pycache__/
+.DS_Store
+*.docx
