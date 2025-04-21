@@ -13,8 +13,40 @@ from motion_detector import MotionDetector
 from db import DBInterface
 from utils import FaceRecognition
 
+from lavis.models import load_model_and_preprocess
+import torch
+from PIL import Image
+
 SNAPSHOT_ALERT_FOLDER = "data/snapshots/alerts"
 SNAPSHOT_UKNOWN_FOLDER = "data/snapshots/unknowns"
+
+
+class CaptionHandler:
+    def __init__(self):
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.model, self.vis_processors, self.txt_processors = (
+            load_model_and_preprocess(
+                # name="blip2",
+                # model_type="coco",
+                name="blip_caption",
+                model_type="base_coco",
+                is_eval=True,
+                device="cpu",
+            )
+        )
+
+    def generate_caption(self, image):
+        image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        pil_image = Image.fromarray(image_rgb)
+        pil_image = self.vis_processors["eval"](pil_image).unsqueeze(0).to(self.device)
+        caption = self.model.generate(
+            {"image": pil_image},
+            use_nucleus_sampling=True,
+            # max_length=20,
+            num_captions=5,
+        )
+        print(caption)
+        return caption[0]
 
 
 class SecuritySystem:
@@ -32,15 +64,16 @@ class SecuritySystem:
         max_encodings_per_person=5,
         check_db_update_per_sec=60,
         update_db_active_alert_per_sec=10,
+        update_captions_per_sec=20,
     ):
-        os.makedirs(SNAPSHOT_ALERT_FOLDER, exist_ok=True)
-        os.makedirs(SNAPSHOT_UKNOWN_FOLDER, exist_ok=True)
-        self.camera_id = camera_id
-        self.known_faces_folder = known_faces_folder
-        self.match_known_threshold = match_known_threshold
-        self.enable_notification = enable_notification
-        self.check_db_update_per_sec = check_db_update_per_sec
-        self.update_db_active_alert_per_sec = update_db_active_alert_per_sec
+        # os.makedirs(SNAPSHOT_ALERT_FOLDER, exist_ok=True)
+        # os.makedirs(SNAPSHOT_UKNOWN_FOLDER, exist_ok=True)
+        # self.camera_id = camera_id
+        # self.known_faces_folder = known_faces_folder
+        # self.match_known_threshold = match_known_threshold
+        # self.enable_notification = enable_notification
+        # self.check_db_update_per_sec = check_db_update_per_sec
+        # self.update_db_active_alert_per_sec = update_db_active_alert_per_sec
 
         self.db = DBInterface()
         print("✅ Loading face encodings...")
@@ -56,47 +89,55 @@ class SecuritySystem:
         self.known_names = list(self.encoding_2_name.values())
         print(f"✅ Loaded {len(self.known_names)} known faces")
 
-        active_alert = self.db.get_latest_alarm_info(
-            self.camera_id, max_encodings_per_person
-        )
+        # active_alert = self.db.get_latest_alarm_info(
+        #     self.camera_id, max_encodings_per_person
+        # )
 
-        if active_alert is not None:
-            print(
-                f"Loading alarm with id: {active_alert.id}, status: {ALERT_STATUS_CODE_2_LABEL[active_alert.status]}"
-            )
-            self.alarm_saved = True
-            self.alarm_updated_db_time = active_alert.update_time
-        else:
-            print("No active or pending alarm found")
-            self.alarm_saved = False
-            self.alarm_updated_db_time = None
+        # if active_alert is not None:
+        #     print(
+        #         f"Loading alarm with id: {active_alert.id}, status: {ALERT_STATUS_CODE_2_LABEL[active_alert.status]}"
+        #     )
+        #     self.alarm_saved = True
+        #     self.alarm_updated_db_time = active_alert.update_time
+        # else:
+        #     print("No active or pending alarm found")
+        #     self.alarm_saved = False
+        #     self.alarm_updated_db_time = None
 
-        self.tracker = UnknownPersonTracker(
-            alert_after_sec=alert_after_sec,
-            forget_after_sec=forget_after_sec,
-            match_unknown_threshold=match_unknown_threshold,
-            match_known_threshold=match_known_threshold,
-            max_unknowns=max_unknowns,
-            max_encodings_per_person=max_encodings_per_person,
-            active_alert=active_alert,
-        )
+        # self.tracker = UnknownPersonTracker(
+        #     alert_after_sec=alert_after_sec,
+        #     forget_after_sec=forget_after_sec,
+        #     match_unknown_threshold=match_unknown_threshold,
+        #     match_known_threshold=match_known_threshold,
+        #     max_unknowns=max_unknowns,
+        #     max_encodings_per_person=max_encodings_per_person,
+        #     active_alert=active_alert,
+        # )
 
         self.motion_detector = MotionDetector(sensitivity=motion_sensitivity)
 
-        pending_alarm_ids = self.db.get_pending_alarm_ids(camera_id)
+        # pending_alarm_ids = self.db.get_pending_alarm_ids(camera_id)
 
         self.face_recognition_util = FaceRecognition()
-        self.request_handler = RequestHandler(
-            camera_id=self.camera_id,
-            db=self.db,
-            pending_alarm_ids=pending_alarm_ids,
-            face_recognition_util=self.face_recognition_util,
-        )
-        self.last_check_make_updates_time = time.time()
+        # self.request_handler = RequestHandler(
+        #     camera_id=self.camera_id,
+        #     db=self.db,
+        #     pending_alarm_ids=pending_alarm_ids,
+        #     face_recognition_util=self.face_recognition_util,
+        # )
+        # self.last_check_make_updates_time = time.time()
+
+        print("✅ Initializing CaptionHandler...")
+
+        start = time.time()
+        self.caption_handler = CaptionHandler()
+        print("🕒 Caption took:", round(time.time() - start, 2), "sec")
+
         # self.request_handler.listen_loop()
 
         # self.notifier = NotificationEngine()
-
+        self.final_caption_time = None
+        self.update_captions_per_sec = update_captions_per_sec
         print("✅ Starting Security System...")
 
     def add_new_known_faces(self, names, new_encodings):
@@ -133,25 +174,41 @@ class SecuritySystem:
                 self.db.updateAlarmStatus(active_alert_id, ALERT_LABEL_2_CODE["False"])
                 self.db.rm_uknowns_on_alarm_id(active_alert_id, self.camera_id)
 
-    def show_rect_label(self, frame, name, top, right, bottom, left, style="simple"):
+    def show_rect_label(self, frame, caption, top, right, bottom, left, style="simple"):
         if style == "simple":
             cv2.rectangle(frame, (left, top), (right, bottom), (0, 255, 0), 2)
+            center_x = (left + right) // 2
+            (text_width, _), _ = cv2.getTextSize(
+                caption, cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2
+            )
+            x_pos = max(0, center_x - (text_width // 2))
             cv2.putText(
                 frame,
-                name,
-                (left, top - 10),
+                caption,
+                (x_pos, top - 10),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.8,
                 (0, 255, 0),
                 2,
             )
+            # cv2.putText(
+            #     frame,
+            #     caption,
+            #     (10, 30),
+            #     cv2.FONT_HERSHEY_SIMPLEX,
+            #     0.7,
+            #     (255, 255, 255),
+            #     2,
+            #     cv2.LINE_AA,
+            # )
+
         else:
             cv2.rectangle(
                 frame, (left, bottom - 35), (right, bottom), (0, 255, 0), cv2.FILLED
             )
             font = cv2.FONT_HERSHEY_DUPLEX
             cv2.putText(
-                frame, name, (left + 6, bottom - 6), font, 1.0, (255, 255, 255), 1
+                frame, frame, (left + 6, bottom - 6), font, 1.0, (255, 255, 255), 1
             )
 
     def get_matches(self, face_encoding):
@@ -210,38 +267,58 @@ class SecuritySystem:
         self.alarm_saved = True
         self.alarm_updated_db_time = alert.update_time
 
+    def must_get_caption(self):
+        if (
+            self.final_caption_time is None
+            or (datetime.datetime.now() - self.final_caption_time).total_seconds()
+            > self.update_captions_per_sec
+        ):
+            self.final_caption_time = datetime.datetime.now()
+            return True
+        return False
+
     def start_face_recognition(
         self,
     ):
         cap = cv2.VideoCapture(0)
         print("✅ Face recognition running — press 'q' to quit.")
+        caption = ""
 
         while True:
-            if (
-                time.time() - self.last_check_make_updates_time
-                > self.check_db_update_per_sec
-            ):
-                self.check_make_updates()
-                self.last_check_make_updates_time = time.time()
-                print(
-                    f"✅ Checked for updates at {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-                )
+            # if (
+            #     time.time() - self.last_check_make_updates_time
+            #     > self.check_db_update_per_sec
+            # ):
+            #     self.check_make_updates()
+            #     self.last_check_make_updates_time = time.time()
+            #     print(
+            #         f"✅ Checked for updates at {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+            #     )
 
             ret, frame = cap.read()
             if not ret:
                 break
+
             orig_frame = frame.copy()
             frame_timestamp = datetime.datetime.now()
             motion_detected = self.motion_detector.detect_motion(frame)
             if motion_detected:
 
-                self.tracker.update_cleanup(update_time=frame_timestamp)
+                #     self.tracker.update_cleanup(update_time=frame_timestamp)
 
-                self.alarm_saved = True if self.tracker.active_alert_exists() else False
+                #     self.alarm_saved = True if self.tracker.active_alert_exists() else False
                 face_locations, encodings = (
                     self.face_recognition_util.get_face_loc_encodings(frame)
                 )  # self.get_face_loc_encodings(frame)
                 alerted = False
+                # caption = ""
+                if self.must_get_caption():
+                    s_capion_time = time.time()
+                    caption = self.caption_handler.generate_caption(frame)
+                    print(
+                        "🕒 Caption took:", round(time.time() - s_capion_time, 2), "sec"
+                    )
+                    print(caption)
                 for (top, right, bottom, left), face_encoding in zip(
                     face_locations, encodings
                 ):
@@ -252,27 +329,34 @@ class SecuritySystem:
                     right *= 2
                     bottom *= 2
                     left *= 2
-                    self.show_rect_label(frame, name, top, right, bottom, left)
+                    # person_caption = f"{name}{caption}"
+                    if caption[:5] == "a man":
+                        person_caption = f"{name}{caption[5:]}"
+                    else:
+                        person_caption = f"{name}: {caption}"
+                    self.show_rect_label(
+                        frame, person_caption, top, right, bottom, left
+                    )
 
-                    if name == "Unknown":
-                        alerted = alerted or self.tracker.single_update(
-                            face_encoding, frame_timestamp, frame
-                        )
-                if not self.tracker.active_alert_exists() and alerted:
-                    print("🚨 Alert triggered!")
-                    self.tracker.alert_all_unknowns(update_time=frame_timestamp)
+            #         if name == "Unknown":
+            #             alerted = alerted or self.tracker.single_update(
+            #                 face_encoding, frame_timestamp, frame
+            #             )
+            #     if not self.tracker.active_alert_exists() and alerted:
+            #         print("🚨 Alert triggered!")
+            #         self.tracker.alert_all_unknowns(update_time=frame_timestamp)
 
-                if self.tracker.active_alert_exists():
-                    if not self.alarm_saved or (
-                        self.alarm_saved
-                        and (
-                            datetime.datetime.now() - self.alarm_updated_db_time
-                        ).total_seconds()
-                        > self.update_db_active_alert_per_sec
-                    ):
-                        self.check_make_updates()
-                        if self.tracker.active_alert_exists():
-                            self.system_alert(self.tracker.active_alert, orig_frame)
+            #     if self.tracker.active_alert_exists():
+            #         if not self.alarm_saved or (
+            #             self.alarm_saved
+            #             and (
+            #                 datetime.datetime.now() - self.alarm_updated_db_time
+            #             ).total_seconds()
+            #             > self.update_db_active_alert_per_sec
+            #         ):
+            #             self.check_make_updates()
+            #             if self.tracker.active_alert_exists():
+            #                 self.system_alert(self.tracker.active_alert, orig_frame)
 
             cv2.imshow("Face Recognition", frame)
             if cv2.waitKey(1) == ord("q"):
@@ -296,6 +380,7 @@ def main():
         max_unknowns=10,
         enable_notification=False,
         max_encodings_per_person=5,
+        update_captions_per_sec=20,
     )
     camera.start_face_recognition()
 

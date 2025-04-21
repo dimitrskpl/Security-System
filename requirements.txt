@@ -5,3 +5,5 @@ numpy
 ipykernel
 secure-smtplib
 python-dotenv
+torch 
+torchvision

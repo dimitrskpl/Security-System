@@ -7,3 +7,4 @@ architecture/
 __pycache__/
 .DS_Store
 *.docx
+my-env
